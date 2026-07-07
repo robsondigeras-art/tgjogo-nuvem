@@ -393,6 +393,7 @@ const lista = reservas.map((r) => ({
   telegram_chat: r.telegram_chat ? "Confirmado no bot" : "Pendente",
   criado_em: new Date(r.criado_em).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }),
   criado_em_iso: r.criado_em,
+bloqueado: bloqueados.has(r.player_id),
 }));
 res.json({ ok: true, total: lista.length, disponiveis: TOTAL - lista.length, participantes: lista });
 });
@@ -476,6 +477,23 @@ sorteiosAtivos = usandoRedis ? (await redisGet(REDIS_KEY_SORTEIOS) || {}) : {};
 console.log("[Redis] Sorteios carregados:", Object.keys(sorteiosAtivos).length);
 
 // ---------------------------------------------------------------
+// BLOQUEADOS
+// ---------------------------------------------------------------
+const REDIS_KEY_BLOQUEADOS = "tgjogo:bloqueados";
+var bloqueados = new Set();
+
+async function salvarBloqueados() {
+  if (usandoRedis) {
+    try { await redisSet(REDIS_KEY_BLOQUEADOS, [...bloqueados]); }
+    catch (e) { console.error("[Redis] Erro salvar bloqueados:", e.message); }
+  }
+}
+
+const _bloqueados = usandoRedis ? (await redisGet(REDIS_KEY_BLOQUEADOS) || []) : [];
+bloqueados = new Set(_bloqueados);
+console.log("[Redis] Bloqueados carregados:", bloqueados.size);
+
+// ---------------------------------------------------------------
 // ESTADO — inscricoes abertas/fechadas
 // ---------------------------------------------------------------
 const REDIS_KEY_ESTADO = "tgjogo:estado";
@@ -495,8 +513,9 @@ dataHoraSorteio = _estado.dataHoraSorteio || null;
 console.log("[Estado] Inscricoes:", inscricoesAbertas ? "abertas" : "fechadas");
 
 app.post("/api/admin/sortear", checkAdmin, function(req, res) {
-  if (!reservas.length) return res.json({ erro: "Nenhum participante inscrito." });
-  var vencedor = reservas[Math.floor(Math.random() * reservas.length)];
+  var elegiveis = reservas.filter(function(r) { return !bloqueados.has(r.player_id); });
+  if (!elegiveis.length) return res.json({ erro: "Nenhum participante elegivel para o sorteio." });
+  var vencedor = elegiveis[Math.floor(Math.random() * elegiveis.length)];
   var sorteioId = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
   sorteiosAtivos[sorteioId] = Object.assign({}, vencedor, { sorteadoEm: new Date().toISOString() });
   salvarSorteios();
@@ -858,7 +877,7 @@ tbody.innerHTML = lista.map(p => \`<tr>
 <td>\${p.telegram_nome}</td>
 <td class="\${p.telegram_chat === 'Confirmado no bot' ? 'ok' : 'pend'}">\${p.telegram_chat}</td>
 <td>\${p.criado_em}</td>
-<td><button class="btn-lib" onclick="liberar(\${parseInt(p.numero)})">\ud83d\uddd1\ufe0f Liberar</button></td>
+<td><button class="btn-lib" onclick="liberar(\${parseInt(p.numero)})">\ud83d\uddd1\ufe0f Liberar</button> <button class="btn-lib" style="\${p.bloqueado ? 'background:rgba(40,180,80,.18);border-color:rgba(40,180,80,.4);color:#5fda8a' : ''}" onclick="toggleBloq('\${p.player_id}')">\${p.bloqueado ? '&#x2705; Desbloquear' : '&#x1F6AB; Bloquear'}</button></td>
 </tr>\`).join('');
 }
 
@@ -939,6 +958,11 @@ else alert('Erro: ' + d.erro);
 
 carregar();
 setInterval(carregar, 30000);
+async function toggleBloq(pid) {
+  var r = await fetch('/api/admin/bloquear/' + encodeURIComponent(pid), { method: 'POST', credentials: 'include' });
+  var d = await r.json();
+  if (d.ok) { carregar(); } else alert('Erro: ' + (d.erro || d.error));
+}
   async function toggleInscricoes() {
     const btn = document.getElementById('btnToggleInscricoes');
     btn.disabled = true;
@@ -1017,6 +1041,15 @@ carregarDataSorteio();
 </script>
 </body>
 </html>`);
+});
+
+app.post("/api/admin/bloquear/:playerId", checkAdmin, async function(req, res) {
+  var pid = decodeURIComponent(req.params.playerId);
+  if (bloqueados.has(pid)) { bloqueados.delete(pid); } else { bloqueados.add(pid); }
+  await salvarBloqueados();
+  var estaBloqueado = bloqueados.has(pid);
+  console.log("[Admin] Player", pid, estaBloqueado ? "bloqueado" : "desbloqueado");
+  res.json({ ok: true, player_id: pid, bloqueado: estaBloqueado });
 });
 
 app.post("/api/admin/toggle-inscricoes", checkAdmin, async function(req, res) {
